@@ -1,0 +1,20 @@
+# Python environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Downloaded models (several GB) and cached pages/translations
+models/
+cache/
+
+# Possible local configuration
+config.json
+.env
+
+# Tools / editors / OS
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

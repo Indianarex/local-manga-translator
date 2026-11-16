@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manga Translator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">漫<span>Manga Translator</span></div>
+    <form id="url-form" class="url-form">
+      <input id="url-input" type="url" placeholder="Paste the URL of a manga chapter…" required>
+      <button type="submit" class="primary">Translate</button>
+    </form>
+    <span id="model-status" class="model-status" title="Local model status">…</span>
+  </header>
+
+  <main>
+    <section id="welcome" class="welcome">
+      <h1>Automatic manga translation → English</h1>
+      <p>Paste the address of a chapter reading page above. The pages are fetched, then the text in every speech bubble
+        is detected, read and translated into English, page by page, entirely on your computer, with no API key and no
+        online service. The next pages are translated ahead of time so you can keep reading without waiting.</p>
+      <p>Source languages: Japanese, Chinese (simplified and traditional), Korean, Spanish, Portuguese, Russian.
+        They are detected automatically, or you can pick one in the toolbar.</p>
+      <p class="muted">The first time a language is used, the models it needs are downloaded once into the
+        <code>models</code> folder (1 to 6 GB).</p>
+      <ul class="keys">
+        <li><kbd>→</kbd> / <kbd>D</kbd> next page</li>
+        <li><kbd>←</kbd> / <kbd>A</kbd> previous page</li>
+        <li><kbd>O</kbd> show the original</li>
+        <li><kbd>S</kbd> hide sound-effect translations</li>
+      </ul>
+      <div id="recent"></div>
+    </section>
+
+    <section id="reader" class="reader hidden">
+      <div class="toolbar" id="toolbar-top">
+        <div class="chapter-title" id="chapter-title"></div>
+        <div class="nav">
+          <button class="nav-prev">◀ Previous</button>
+          <select id="page-select" title="Go to page"></select>
+          <button class="nav-next primary">Next ▶</button>
+        </div>
+        <div class="tools">
+          <select id="lang-select" title="Source language of the manga"></select>
+          <span id="lang-detected" class="muted"></span>
+          <label class="toggle"><input type="checkbox" id="show-original"> Original</label>
+          <label class="toggle"><input type="checkbox" id="hide-sfx" title="Hide the small translations next to drawn sound effects"> Hide SFX</label>
+          <button id="retranslate-btn" title="Translate this page again">↻ Retranslate</button>
+          <button id="download-btn" title="Download the translated page (PNG)">⬇ PNG</button>
+        </div>
+      </div>
+
+      <div id="status" class="status hidden"></div>
+
+      <div class="stage">
+        <div id="page" class="page">
+          <img id="page-img" alt="">
+          <div id="overlay" class="overlay"></div>
+          <div id="page-spinner" class="spinner hidden"><div></div><span>Translating…</span></div>
+        </div>
+      </div>
+
+      <div class="toolbar bottom">
+        <div class="nav">
+          <button class="nav-prev">◀ Previous</button>
+          <span id="page-label" class="page-label"></span>
+          <button class="nav-next primary">Next ▶</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
