@@ -1,6 +1,6 @@
 # Manga Translator (fully local)
 
-[![tests](https://github.com/Indianarex/mangatranslation/actions/workflows/tests.yml/badge.svg)](https://github.com/Indianarex/mangatranslation/actions/workflows/tests.yml)
+[![tests](https://github.com/Indianarex/local-manga-translator/actions/workflows/tests.yml/badge.svg)](https://github.com/Indianarex/local-manga-translator/actions/workflows/tests.yml)
 
 A reader that automatically translates manga, manhwa and manhua into English, **entirely on your computer**: no API key and no online translation service. Paste the URL of a chapter. The app downloads the pages, detects the speech bubbles, reads the text, translates it into English and letters the translation into the page in place of the original text. You read page by page, and the next pages are translated ahead of time.
 
