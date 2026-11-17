@@ -29,6 +29,10 @@ function showStatus(msg, kind = "error") {
 function hideStatus() { els.status.className = "status hidden"; }
 
 async function api(path, opts = {}) {
+  if (opts.method === "POST" && !opts.body) {
+    // The server only accepts JSON for requests that act (protection against other sites)
+    opts = { ...opts, headers: { "Content-Type": "application/json" }, body: "{}" };
+  }
   const r = await fetch(path, opts);
   let body = null;
   try { body = await r.json(); } catch {}

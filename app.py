@@ -33,6 +33,32 @@ CACHE.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, static_folder=str(ROOT / "static"), static_url_path="/static")
 
+# The server only listens on 127.0.0.1, but any web page open in the browser can still send it requests.
+# Only accept requests addressed to localhost (blocks DNS rebinding), and only JSON for requests that act
+# (browsers cannot send those cross-site without a CORS preflight, which this server never grants).
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+@app.before_request
+def _local_only():
+    host = (request.host or "").lower()
+    if not host.startswith("["):
+        host = host.split(":")[0]
+    elif "]" in host:
+        host = host[:host.index("]") + 1]
+    if host not in _LOCAL_HOSTS:
+        abort(403)
+    if request.method == "POST" and not request.is_json:
+        return jsonify({"error": "Only JSON requests are accepted"}), 415
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
+
 _chapters: dict[str, Chapter] = {}
 _jobs: dict[tuple[str, int, str], Future] = {}
 _jobs_lock = threading.Lock()
@@ -72,9 +98,11 @@ def _get_chapter(cid: str) -> Chapter:
 
 
 def _save_chapter(cid: str, ch: Chapter):
-    (_chapter_dir(cid) / "chapter.json").write_text(
-        json.dumps(ch.__dict__, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
+    # Write to a temporary file, then swap it in: a crash can never leave a half-written chapter.json
+    path = _chapter_dir(cid) / "chapter.json"
+    tmp = path.with_name(f"chapter.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(ch.__dict__, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _prune_cache(keep: str | None = None):
@@ -278,7 +306,7 @@ def get_languages():
 
 @app.post("/api/chapter")
 def load_chapter():
-    url = (request.get_json(force=True).get("url") or "").strip()
+    url = ((request.get_json(silent=True) or {}).get("url") or "").strip()
     if not url:
         return jsonify({"error": "Missing URL"}), 400
     cid = _chapter_id(url)

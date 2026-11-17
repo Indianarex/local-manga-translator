@@ -22,6 +22,20 @@ def test_status_and_languages(client):
     assert c.get("/api/languages").get_json()[0]["code"] == "auto"
 
 
+def test_only_local_json_requests_are_accepted(client):
+    c, _ = client
+    # DNS rebinding: a request addressed to another host name is refused
+    assert c.get("/api/status", headers={"Host": "evil.example:5000"}).status_code == 403
+    assert c.get("/api/status", headers={"Host": "127.0.0.1:5000"}).status_code == 200
+    assert c.get("/api/status", headers={"Host": "[::1]:5000"}).status_code == 200
+    # cross-site "simple" requests (form posts, text/plain) cannot act
+    r = c.post("/api/chapter", data="url=https://example.com", content_type="application/x-www-form-urlencoded")
+    assert r.status_code == 415
+    assert c.post("/api/chapter/deadbeefdeadbeef/extend?n=1").status_code == 415
+    r = c.get("/api/status")
+    assert r.headers["X-Frame-Options"] == "DENY" and r.headers["X-Content-Type-Options"] == "nosniff"
+
+
 def test_unknown_or_crafted_chapter_ids(client):
     c, _ = client
     for cid in ("deadbeefdeadbeef", "%2e%2e", "..%5c..%5cWindows"):
@@ -45,9 +59,9 @@ def test_links_only_reader_is_discovered_while_reading(client, site):
     assert ch["start_page"] == 2 and ch["more"] and ch["page_count"] == 3
     r = c.get(f"/api/chapter/{ch['id']}/page/2/image")           # image of the page we asked for
     assert r.status_code == 200 and r.mimetype == "image/png"
-    ch = c.post(f"/api/chapter/{ch['id']}/extend?n=5").get_json()  # discover up to page 6
+    ch = c.post(f"/api/chapter/{ch['id']}/extend?n=5", json={}).get_json()  # discover up to page 6
     assert ch["page_count"] == 6 and ch["more"]
-    ch = c.post(f"/api/chapter/{ch['id']}/extend?n=999").get_json()
+    ch = c.post(f"/api/chapter/{ch['id']}/extend?n=999", json={}).get_json()
     assert ch["page_count"] == PAGES and not ch["more"]
 
 
