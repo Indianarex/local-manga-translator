@@ -1,8 +1,11 @@
 """Fetch the list of page images of a manga chapter from a URL."""
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import re
+import socket
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -16,6 +19,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
 HEADERS = {"User-Agent": USER_AGENT, "Accept-Language": "en;q=0.9,*;q=0.5"}
+MAX_REDIRECTS = 5
 
 IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|avif)(?:\?|#|$)", re.I)
 SCRIPT_IMG_RE = re.compile(
@@ -54,6 +58,51 @@ class Chapter:
 
 class ScrapeError(Exception):
     pass
+
+
+class BlockedURL(ScrapeError):
+    """The address is not a public web address (local network, loopback, non-HTTP scheme...)."""
+
+
+# --------------------------------------------------------------------------- safe downloads
+#
+# Every download goes through fetch(). The app downloads addresses given by the user and addresses
+# found in web pages, so a page could point it at the local network (router, internal services,
+# cloud metadata...). Only http(s) addresses that resolve to public IPs are allowed, and each
+# redirect is checked the same way.
+
+def _private_hosts_allowed() -> bool:
+    # For the test suite, which serves a fake manga site on 127.0.0.1
+    return os.environ.get("MANGA_ALLOW_PRIVATE_HOSTS") == "1"
+
+
+def check_url(url: str) -> str:
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise BlockedURL("Only http and https addresses can be opened.")
+    if _private_hosts_allowed():
+        return url
+    try:
+        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise requests.ConnectionError(f"Unknown host: {p.hostname}") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+                or ip.is_unspecified or (ip.version == 6 and ip.ipv4_mapped and not ip.ipv4_mapped.is_global)):
+            raise BlockedURL("Addresses on the local network are not allowed.")
+    return url
+
+
+def fetch(url: str, headers: dict | None = None, timeout: float = 30) -> requests.Response:
+    """GET a public web address, following (and checking) redirects."""
+    for _ in range(MAX_REDIRECTS + 1):
+        r = requests.get(check_url(url), headers=headers or HEADERS, timeout=timeout, allow_redirects=False)
+        if not r.is_redirect:
+            return r
+        url = urljoin(url, r.headers["Location"])
+    raise requests.TooManyRedirects(f"More than {MAX_REDIRECTS} redirects")
 
 
 # --------------------------------------------------------------------------- utils
@@ -153,7 +202,7 @@ def _same_site(a: str, b: str) -> bool:
 
 
 def _fetch_soup(url: str) -> BeautifulSoup:
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = fetch(url)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
@@ -416,6 +465,7 @@ def _images_with_browser(url: str) -> tuple[list[str], str]:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return [], ""
+    check_url(url)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent=USER_AGENT)
@@ -454,7 +504,7 @@ def _scrape(url: str) -> Chapter:
     if m:
         return _mangadex(url, m.group(1))
 
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp = fetch(url)
     resp.raise_for_status()
     ctype = resp.headers.get("Content-Type", "")
     if ctype.startswith("image/") or IMG_EXT_RE.search(urlparse(url).path):

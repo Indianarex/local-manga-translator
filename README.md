@@ -134,6 +134,7 @@ To free disk space, delete the `models/` (models) and `cache/` (downloaded pages
 - **Slow translation**: check the badge in the top-right corner. "ready (CPU)" means no GPU is used; on an NVIDIA machine, delete `.venv` and run the launcher again so it installs the CUDA build of PyTorch.
 - **SSL / certificate errors**: antivirus software or corporate proxies that inspect HTTPS are handled through the system certificate store (`truststore`); make sure it is installed.
 - **A page looks wrong**: click **↻ Retranslate**, or pick the source language by hand instead of "Auto-detect".
+- **"This address cannot be opened"**: for safety, the app only downloads from public web addresses, never from this computer or the local network (a web page could otherwise point it at your router or other devices). To read from a manga server on your own network (Komga, Kavita…), start the app with the environment variable `MANGA_ALLOW_PRIVATE_HOSTS=1`.
 
 ## Development
 

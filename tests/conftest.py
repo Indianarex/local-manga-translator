@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +14,8 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+# The fake site runs on 127.0.0.1, which the app normally refuses to download from
+os.environ["MANGA_ALLOW_PRIVATE_HOSTS"] = "1"
 
 PAGES = 12  # pages of each fake chapter
 ICONS = '<img src="/ui/prev.png"><img src="/ui/next.png"><img src="/ui/logo.png">'
@@ -52,6 +55,8 @@ class _Handler(BaseHTTPRequestHandler):
         p = self.path.split("?")[0].strip("/").split("/")
         if p[0] == "ui":
             return self._send(_png(0, (24, 24)), "image/png")
+        if p[0] == "empty":  # a page without any manga image
+            return self._send(b"<html><body><p>Nothing here</p></body></html>")
         if p[0] == "img":
             return self._send(_png(int(p[1])), "image/png")
         # 1. numbered URLs: /num/page/<n>, with links to the neighbours and to the last page
