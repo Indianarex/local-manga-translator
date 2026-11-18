@@ -24,6 +24,10 @@ EASYOCR_DIR = ROOT / "models" / "easyocr"
 import numpy as np
 from PIL import Image
 
+# Refuse "decompression bombs" (small files that decode into huge images): manga pages are a few
+# megapixels and long webtoon strips stay well under this. Pillow raises an error beyond twice the limit.
+Image.MAX_IMAGE_PIXELS = 60_000_000
+
 DETECTOR_ID = "ogkalu/comic-text-and-bubble-detector"
 JA_OCR_ID = "kha-white/manga-ocr-base"
 JA_MT_ID = "LiquidAI/LFM2-350M-ENJP-MT"
@@ -47,7 +51,7 @@ def _hub(model_id: str) -> dict:
 def _weights(model_id: str) -> dict:
     return {"revision": REVISIONS[model_id], "use_safetensors": True}
 
-FORMAT = 2            # version of the translation result; older cached results are recomputed
+FORMAT = 3            # version of the translation result; older cached results are recomputed
 DET_THRESHOLD = 0.35
 TALL_RATIO = 2.2      # taller than this (webtoon strips), the image is cut into slices
 SLICE_RATIO = 1.5     # slice height = 1.5 x width
@@ -108,6 +112,7 @@ class _Models:
         self.base_loaded = False
         self._readers: dict[str, object] = {}
         self._ja = None
+        self._ja_mt = None
         self._nllb = None
 
     # ---- base: torch + bubble detector
@@ -169,25 +174,38 @@ class _Models:
             self._readers[group] = self._step(f"loading the {group} OCR", make)
         return self._readers[group]
 
-    # ---- Japanese: manga-ocr + LFM2
-    def ja(self):
+    # ---- Japanese: manga-ocr (also used to recognize Japanese pages) and LFM2, loaded separately so the
+    # translation model is only loaded when a page really is Japanese
+    def ja_ocr(self):
         if self._ja is None:
             def make():
-                from transformers import AutoModelForCausalLM, AutoTokenizer, VisionEncoderDecoderModel, ViTImageProcessor
+                from transformers import AutoTokenizer, VisionEncoderDecoderModel, ViTImageProcessor
 
-                t = self.torch
                 proc = ViTImageProcessor.from_pretrained(JA_OCR_ID, **_hub(JA_OCR_ID))
                 tok = AutoTokenizer.from_pretrained(JA_OCR_ID, **_hub(JA_OCR_ID))
                 ocr = VisionEncoderDecoderModel.from_pretrained(
                     JA_OCR_ID, **_weights(JA_OCR_ID)).to(self.device, dtype=self.half).eval()
-                mt_tok = AutoTokenizer.from_pretrained(JA_MT_ID, **_hub(JA_MT_ID))
-                mt_tok.padding_side = "left"
-                mt_dtype = {"cuda": t.bfloat16, "mps": t.float16}.get(self.device, t.float32)
-                mt = AutoModelForCausalLM.from_pretrained(
-                    JA_MT_ID, dtype=mt_dtype, **_weights(JA_MT_ID)).to(self.device).eval()
-                return proc, tok, ocr, mt_tok, mt
-            self._ja = self._step("loading the Japanese models", make)
+                return proc, tok, ocr
+            self._ja = self._step("loading the Japanese OCR", make)
         return self._ja
+
+    def ja_mt(self):
+        if self._ja_mt is None:
+            def make():
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+
+                t = self.torch
+                tok = AutoTokenizer.from_pretrained(JA_MT_ID, **_hub(JA_MT_ID))
+                tok.padding_side = "left"
+                dtype = {"cuda": t.bfloat16, "mps": t.float16}.get(self.device, t.float32)
+                mt = AutoModelForCausalLM.from_pretrained(
+                    JA_MT_ID, dtype=dtype, **_weights(JA_MT_ID)).to(self.device).eval()
+                return tok, mt
+            self._ja_mt = self._step("loading the Japanese translation model", make)
+        return self._ja_mt
+
+    def ja(self):  # both Japanese models (kept for scripts and tests)
+        return (*self.ja_ocr(), *self.ja_mt())
 
     # ---- NLLB (every other language)
     def nllb(self):
@@ -218,7 +236,7 @@ class _Models:
         ]
 
     def ocr_ja(self, crops):
-        proc, tok, ocr, _, _ = self.ja()
+        proc, tok, ocr = self.ja_ocr()
         out = []
         for i in range(0, len(crops), 16):
             batch = [c.convert("L").convert("RGB") for c in crops[i:i + 16]]
@@ -230,15 +248,38 @@ class _Models:
                 out.append(re.sub("[・.]{2,}", lambda m: (m.end() - m.start()) * ".", text))
         return out
 
-    def ocr_easy(self, group, crop: Image.Image):
-        """Return (text, mean confidence) for one text area."""
-        img = crop.convert("RGB")
-        if group in ("ch_sim", "ch_tra") and img.height > 1.3 * img.width:
-            img = _reflow_vertical(img)  # EasyOCR only reads horizontal lines
-        if img.height < 80 or img.width < 80:  # small text reads better when upscaled
-            f = 80 / min(img.height, img.width)
-            img = img.resize((int(img.width * f), int(img.height * f)), Image.LANCZOS)
-        res = self.reader(group).readtext(np.array(img), detail=1, paragraph=False)
+    def ocr_easy(self, group, crop: Image.Image, cache: dict | None = None):
+        """Return (text, mean confidence) for one text area.
+
+        Finding the text lines (CRAFT) is the slow part and does not depend on the language, so with a
+        `cache` dict it is done once per area and shared by every script tried on it; results are cached too.
+        """
+        cache = {} if cache is None else cache
+        reflow = group in ("ch_sim", "ch_tra") and crop.height > 1.3 * crop.width
+        if (group, id(crop)) in cache:
+            return cache[(group, id(crop))]
+        key = ("lines", id(crop), reflow)
+        if key not in cache:
+            img = crop.convert("RGB")
+            if reflow:
+                img = _reflow_vertical(img)  # EasyOCR only reads horizontal lines
+            if img.height < 80 or img.width < 80:  # small text reads better when upscaled
+                f = 80 / min(img.height, img.width)
+                img = img.resize((int(img.width * f), int(img.height * f)), Image.LANCZOS)
+            from easyocr.utils import reformat_input
+
+            rgb, grey = reformat_input(np.array(img))
+            horizontal, free = self.reader(group).detect(rgb, reformat=False)
+            cache[key] = (grey, horizontal[0], free[0])
+        grey, horizontal, free = cache[key]
+        res = []
+        if horizontal or free:
+            res = self.reader(group).recognize(grey, horizontal, free, detail=1, paragraph=False, reformat=False)
+        cache[(group, id(crop))] = out = self._join_lines(group, res)
+        return out
+
+    @staticmethod
+    def _join_lines(group, res):
         if not res:
             return "", 0.0
         # sort into lines (top -> bottom), then left -> right
@@ -250,7 +291,7 @@ class _Models:
         return text, conf
 
     def translate_ja(self, texts):
-        _, _, _, tok, mt = self.ja()
+        tok, mt = self.ja_mt()
         out = []
         for i in range(0, len(texts), 16):
             chunk = texts[i:i + 16]
@@ -326,31 +367,44 @@ def _kana_share(texts: list[str]) -> float:
     return sum(len(RE_KANA.findall(t)) for t in texts) / letters if letters else 0.0
 
 
-def detect_language(crops: list[Image.Image]) -> str:
-    """Try every script on a few text areas and keep the most consistent one."""
-    sample = sorted(crops, key=lambda c: -c.width * c.height)[:4]
+def _kana_density(texts: list[str]) -> float:
+    """Share of kana among all characters read by manga-ocr. On non-Japanese text manga-ocr outputs
+    garbage full of digits and symbols, which keeps this low (Korean ~0.14, Japanese ~0.6)."""
+    chars = sum(len([ch for ch in t if not ch.isspace()]) for t in texts)
+    return sum(len(RE_KANA.findall(t)) for t in texts) / chars if chars else 0.0
+
+
+_FAMILY = {"ja": "ja", "ch_sim": "zh", "ch_tra": "zh", "ko": "ko", "ru": "ru", "latin": "latin"}
+_SCRIPTS = {"ja": RE_KANA, "ch_sim": RE_HAN, "ch_tra": RE_HAN, "ko": RE_HANGUL, "ru": RE_CYR, "latin": RE_LATIN}
+
+
+def detect_language(crops: list[Image.Image], cache: dict | None = None) -> tuple[str, float]:
+    """Find the language of a page from a few of its text areas.
+
+    Returns (language, confidence): confidence goes from 0 (two scripts score the same) to 1 (only one
+    script reads anything sensible)."""
+    sample = sorted(crops, key=lambda c: -c.width * c.height)[:3]
     if not sample:
-        return "ja"
+        return "ja", 0.0
 
-    # Vertical text (columns taller than wide) is almost always Japanese or Chinese. EasyOCR cannot
-    # read it, so manga-ocr decides: Japanese dialogue is full of kana, Chinese has none.
-    # Tall, narrow bubbles also occur with horizontal Latin lettering, so the other scripts stay in the race.
+    # 1. Japanese, the most common case, in one fast pass: manga-ocr (which also reads vertical text)
+    #    on Japanese dialogue gives text full of kana.
     vertical = sum(c.height > 1.3 * c.width for c in sample) >= len(sample) / 2
-    if vertical:
-        if _kana_share(MODELS.ocr_ja(sample)) > 0.15:
-            return "ja"
-        groups = {"ch_sim": RE_HAN, "ch_tra": RE_HAN, "ko": RE_HANGUL, "ru": RE_CYR, "latin": RE_LATIN}
-    else:
-        groups = {"ja": RE_KANA, "ch_sim": RE_HAN, "ch_tra": RE_HAN, "ko": RE_HANGUL, "ru": RE_CYR,
-                  "latin": RE_LATIN}
+    kana = _kana_density(MODELS.ocr_ja(sample))
+    if kana >= 0.35 or (vertical and kana >= 0.2):
+        return "ja", min(1.0, 0.5 + kana)
 
-    scores, texts = {}, {}
-    for group, pat in groups.items():
+    # 2. Otherwise every other script is tried with EasyOCR, and the most consistent reading wins.
+    #    EasyOCR cannot read vertical columns (except Chinese, which is reflowed into lines first).
+    #    Traditional Chinese is only tried when simplified Chinese is ahead: it is the same script.
+    groups = ["latin", "ru", "ko", "ch_sim"] + (["ja"] if kana >= 0.1 and not vertical else [])
+
+    def score(group: str) -> tuple[float, list[str]]:
         s, ts = 0.0, []
         for c in sample:
-            text, conf = MODELS.ocr_easy(group, c)
+            text, conf = MODELS.ocr_easy(group, c, cache)
             ts.append(text)
-            ratio = _script_ratio(text, pat)
+            ratio = _script_ratio(text, _SCRIPTS[group])
             if group == "ja":  # Japanese is recognized by its kana, mixed with kanji
                 ratio = min(1.0, (len(RE_KANA.findall(text)) + len(RE_HAN.findall(text)))
                             / max(1, len(RE_LETTER.findall(text)))) if RE_KANA.search(text) else 0.0
@@ -359,11 +413,25 @@ def detect_language(crops: list[Image.Image]) -> str:
                 known = sum(any(w in sw for sw in STOPWORDS.values()) for w in words)
                 ratio *= min(1.0, 0.3 + known / max(1, len(words)))
             s += conf * ratio * _letter_density(text) * max(1, len(text)) ** 0.5
-        scores[group], texts[group] = s, ts
+        return s, ts
+
+    scores, texts = {}, {}
+    for group in groups:
+        scores[group], texts[group] = score(group)
+    if max(scores, key=scores.get) == "ch_sim":
+        scores["ch_tra"], texts["ch_tra"] = score("ch_tra")
     best = max(scores, key=scores.get)
+    # confidence: lead over the best group of another script family (simplified vs traditional Chinese
+    # use the same script, so their scores are always close)
+    rival = max((v for g, v in scores.items() if _FAMILY[g] != _FAMILY[best]), default=0.0)
+    confidence = (scores[best] - rival) / scores[best] if scores[best] > 0 else 0.0
     if best == "latin":
-        return _latin_language(texts["latin"])
-    return {"ja": "ja", "ch_sim": "zh", "ch_tra": "zh-hant", "ko": "ko", "ru": "ru"}[best]
+        return _latin_language(texts["latin"]), confidence
+    return {"ja": "ja", "ch_sim": "zh", "ch_tra": "zh-hant", "ko": "ko", "ru": "ru"}[best], confidence
+
+
+# Below this confidence, the language most often found in the chapter (or announced by the site) wins
+HINT_CONFIDENCE = 0.35
 
 
 # --------------------------------------------------------------------------- vertical text
@@ -517,21 +585,28 @@ def _sentence_case(text: str) -> str:
 
 # --------------------------------------------------------------------------- API
 
+def _open_page(image_bytes: bytes) -> Image.Image:
+    """Decode a page image as RGB (transparent areas become white)."""
+    try:
+        full = Image.open(io.BytesIO(image_bytes))
+        full.load()
+    except Image.DecompressionBombError as e:
+        raise TranslationError("Image too large to be a manga page.") from e
+    except Exception as e:
+        raise TranslationError("Unreadable image.") from e
+    if full.mode in ("RGBA", "LA", "P"):
+        rgba = full.convert("RGBA")
+        bg = Image.new("RGB", full.size, "white")
+        bg.paste(rgba, mask=rgba.split()[-1])
+        full = bg
+    return full.convert("RGB")
+
+
 class Translator:
     def translate(self, image_bytes: bytes, lang: str = "auto", hint: str | None = None) -> dict:
         """lang: 'auto' or a LANGUAGES code; hint: likely language (e.g. already detected for the chapter)."""
+        full = _open_page(image_bytes)
         MODELS.load_base()
-        try:
-            full = Image.open(io.BytesIO(image_bytes))
-            full.load()
-        except Exception as e:
-            raise TranslationError("Unreadable image.") from e
-        if full.mode in ("RGBA", "LA", "P"):
-            rgba = full.convert("RGBA")
-            bg = Image.new("RGB", full.size, "white")
-            bg.paste(rgba, mask=rgba.split()[-1])
-            full = bg
-        full = full.convert("RGB")
         W, H = full.size
 
         with MODELS.lock:
@@ -550,18 +625,22 @@ class Translator:
             crops = [full.crop(tuple(int(v) for v in box)) for _, _, box in texts]
 
             auto = lang not in LANGUAGES
+            ocr_cache: dict = {}
             if not crops:
                 lang = lang if not auto else (hint if hint in LANGUAGES else "ja")
                 return {"format": FORMAT, "source_language": lang, "source_language_name": LANGUAGES[lang][0],
                         "width": W, "height": H, "items": []}
             if auto:
-                lang = hint if hint in LANGUAGES else detect_language(crops)
+                # Every page is checked: a chapter can mix languages (credits, covers, English titles), and a
+                # language announced by the site can be wrong. The hint only settles uncertain cases.
+                detected, confidence = detect_language(crops, ocr_cache)
+                lang = hint if hint in LANGUAGES and hint != detected and confidence < HINT_CONFIDENCE else detected
 
-            # ---- OCR
+            # ---- OCR (areas already read while detecting the language are not read again)
             if lang == "ja":
                 originals = MODELS.ocr_ja(crops)
             else:
-                originals = [MODELS.ocr_easy(LANGUAGES[lang][2], c)[0] for c in crops]
+                originals = [MODELS.ocr_easy(LANGUAGES[lang][2], c, ocr_cache)[0] for c in crops]
             if auto and lang in ("es", "pt", "en"):
                 lang = _latin_language(originals)
             originals = [_clean_ocr(s, lang) for s in originals]

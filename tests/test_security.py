@@ -43,6 +43,7 @@ def test_redirects_are_checked(site, monkeypatch):
         r = requests.Response()
         r.status_code, r.url = 302, url
         r.headers["Location"] = "http://169.254.169.254/latest/meta-data"
+        r._content, r._content_consumed = b"", True
         return r
 
     monkeypatch.setattr(scraper.requests, "get", fake_get)
@@ -50,6 +51,24 @@ def test_redirects_are_checked(site, monkeypatch):
     with pytest.raises(scraper.BlockedURL):
         scraper.fetch("http://93.184.216.34/redirect")
     assert calls == ["http://93.184.216.34/redirect"]   # the redirect target was never requested
+
+
+def test_downloads_are_size_limited(site):
+    base, _ = site
+    with pytest.raises(requests.RequestException, match="larger than"):
+        scraper.fetch(f"{base}/huge", max_bytes=10 * 1024 * 1024)
+    r = scraper.fetch(f"{base}/img/1", max_bytes=10 * 1024 * 1024)     # a normal page image is fine
+    assert r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_decompression_bombs_are_refused():
+    import io
+    import translator
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("1", (12000, 12000)).save(buf, "PNG")   # 144 megapixels in a tiny file
+    with pytest.raises(translator.TranslationError, match="too large"):
+        translator._open_page(buf.getvalue())
 
 
 @pytest.fixture()

@@ -95,13 +95,26 @@ def check_url(url: str) -> str:
     return url
 
 
-def fetch(url: str, headers: dict | None = None, timeout: float = 30) -> requests.Response:
-    """GET a public web address, following (and checking) redirects."""
+def fetch(url: str, headers: dict | None = None, timeout: float = 30,
+          max_bytes: int = 10 * 1024 * 1024) -> requests.Response:
+    """GET a public web address, following (and checking) redirects. The body is read up to max_bytes,
+    so a hostile server cannot make the app download gigabytes."""
     for _ in range(MAX_REDIRECTS + 1):
-        r = requests.get(check_url(url), headers=headers or HEADERS, timeout=timeout, allow_redirects=False)
-        if not r.is_redirect:
-            return r
-        url = urljoin(url, r.headers["Location"])
+        r = requests.get(check_url(url), headers=headers or HEADERS, timeout=timeout, allow_redirects=False,
+                         stream=True)
+        if r.is_redirect:
+            r.close()
+            url = urljoin(url, r.headers["Location"])
+            continue
+        body = bytearray()
+        for chunk in r.iter_content(64 * 1024):
+            body += chunk
+            if len(body) > max_bytes:
+                r.close()
+                raise requests.RequestException(f"Response larger than {max_bytes // (1024 * 1024)} MB: {url}")
+        r._content = bytes(body)   # let .text / .json() / .content work as usual
+        r._content_consumed = True
+        return r
     raise requests.TooManyRedirects(f"More than {MAX_REDIRECTS} redirects")
 
 

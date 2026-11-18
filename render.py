@@ -377,7 +377,7 @@ def render_page(image_bytes: bytes, data: dict, hide_sfx: bool = False, fmt: str
 
     buf = io.BytesIO()
     if fmt.upper() == "WEBP":
-        out.save(buf, format="WEBP", quality=92, method=4)
+        out.save(buf, format="WEBP", quality=92, method=2)  # method 4 is 2-3x slower for a 1% smaller file
     else:
         out.save(buf, format="PNG")
     return buf.getvalue()

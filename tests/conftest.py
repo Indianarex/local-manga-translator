@@ -57,6 +57,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(_png(0, (24, 24)), "image/png")
         if p[0] == "empty":  # a page without any manga image
             return self._send(b"<html><body><p>Nothing here</p></body></html>")
+        if p[0] == "huge":  # a response far larger than any manga page
+            return self._send(b"\0" * (12 * 1024 * 1024), "image/png")
         if p[0] == "img":
             return self._send(_png(int(p[1])), "image/png")
         # 1. numbered URLs: /num/page/<n>, with links to the neighbours and to the last page

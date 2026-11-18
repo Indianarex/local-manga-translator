@@ -171,7 +171,7 @@ def _ensure_page(cid: str, n: int) -> bool:
 
 
 def _download_image(url: str, headers: dict) -> requests.Response:
-    r = fetch(url, headers=headers, timeout=60)  # public addresses only (see scraper.fetch)
+    r = fetch(url, headers=headers, timeout=60, max_bytes=50 * 1024 * 1024)  # public addresses only, 50 MB max
     r.raise_for_status()
     if not r.headers.get("Content-Type", "image/").startswith("image/"):
         raise requests.HTTPError(f"Not an image ({r.headers.get('Content-Type')}) at {url}")
@@ -274,12 +274,16 @@ def _do_translate(cid: str, n: int, lang: str, prerender: bool = False) -> dict:
     if result is None:
         img, _ = _page_image(cid, n)
         ch = _get_chapter(cid)
-        # Likely language: announced by the site (MangaDex) or detected on an earlier page
-        hint = ch.extra.get("lang") or ch.extra.get("detected_lang")
+        # Likely language, used only when a page's own detection is uncertain: the language found on most
+        # pages of the chapter so far, else the one announced by the site (MangaDex)
+        votes = ch.extra.get("lang_votes") or {}
+        hint = max(votes, key=votes.get) if votes else ch.extra.get("lang")
         result = _translator.translate(img, lang=lang, hint=hint)
-        if lang == "auto" and result["items"] and not ch.extra.get("detected_lang"):
-            ch.extra["detected_lang"] = result["source_language"]
-            _save_chapter(cid, ch)
+        if lang == "auto" and len(result["items"]) >= 2:  # pages with one or two words are not reliable votes
+            with _extend_lock:
+                votes = ch.extra.setdefault("lang_votes", {})
+                votes[result["source_language"]] = votes.get(result["source_language"], 0) + 1
+                _save_chapter(cid, ch)
         path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     if prerender:  # letter the page now, so turning to it is instant
         _render(cid, n, lang, hide_sfx=False)
